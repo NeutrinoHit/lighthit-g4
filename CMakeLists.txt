@@ -16,7 +16,16 @@ find_package(nanobind CONFIG REQUIRED)
 # Geant4 built with static libraries (BUILD_STATIC_LIBS=ON,
 # GEANT4_BUILD_TLS_MODEL=global-dynamic, position-independent code); point
 # Geant4_DIR or CMAKE_PREFIX_PATH at its installation.
-find_package(Geant4 11.4 REQUIRED COMPONENTS static)
+find_package(Geant4 11.4 QUIET COMPONENTS static)
+if(NOT Geant4_FOUND)
+  message(FATAL_ERROR
+    "Geant4 11.4 with static libraries was not found.\n"
+    "There is no prebuilt wheel of lighthit-g4 for this platform, so it is built "
+    "from source. Build Geant4 first and point CMake at it:\n"
+    "  ci/build_geant4.sh $HOME/geant4-static\n"
+    "  CMAKE_PREFIX_PATH=$HOME/geant4-static python -m pip install lighthit-g4\n"
+    "(ci/build_geant4.sh is in the source distribution and in the repository.)")
+endif()
 
 nanobind_add_module(_core STABLE_ABI NB_STATIC cpp/core.cpp cpp/external_decayer.cpp)
 target_include_directories(_core PRIVATE cpp)

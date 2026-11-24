@@ -15,9 +15,11 @@ reference: on the same seeds both give identical events (tested).
 ## Install
 
 ```bash
-python -m pip install lighthit-g4               # wheel with Geant4 inside
-python -m pip install 'lighthit-g4[pythia]'     # + Pythia 8 tau decays
+python -m pip install --pre lighthit-g4               # wheel with Geant4 inside
+python -m pip install --pre 'lighthit-g4[pythia]'     # + Pythia 8 tau decays
 ```
+
+`--pre` is needed while only alpha releases exist.
 
 Wheels are built for Linux (x86_64, aarch64) and macOS (x86_64, arm64),
 Python 3.12 and newer. Geant4 data sets (about 2 GB) are taken from the
@@ -190,3 +192,6 @@ lighthit-g4 is MIT-licensed. The wheels contain Geant4 (Geant4 Software
 License) with its bundled CLHEP (LGPL-3.0), Expat, PTL, zlib and g4tools,
 and nanobind; their license texts are in `LICENSES/`. Pythia 8 (GPL-2.0) is
 not part of the wheels: it is installed separately as `pythia8mc`.
+
+This product includes software developed by Members of the Geant4
+Collaboration ( http://cern.ch/geant4 ).

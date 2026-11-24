@@ -28,6 +28,38 @@ jobs:
           name: wheel-${{ matrix.os }}
           path: wheelhouse/*.whl
 
+  test:
+    # the full test suite on each built wheel, with the Geant4 data sets cached
+    name: test ${{ matrix.os }}
+    needs: wheels
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15-intel, macos-15]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheel-${{ matrix.os }}
+          path: wheelhouse
+      - uses: actions/cache@v6
+        with:
+          path: ~/.lighthit-g4/geant4-data
+          key: geant4-data-11.4.1-${{ runner.os }}
+      - name: install
+        run: |
+          python -m pip install "$(ls wheelhouse/*.whl)[test]"
+          python -m pip install pythia8mc || echo "pythia8mc not available: Pythia tests are skipped"
+          python -m pip install lighthit || echo "lighthit not available: the LightHit reading test is skipped"
+      - name: pytest
+        env:
+          LIGHTHIT_G4_INSTALLED: "1"
+        run: python -m pytest -q tests
+
   sdist:
     runs-on: ubuntu-latest
     steps:
