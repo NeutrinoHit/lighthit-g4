@@ -1,0 +1,9 @@
+__pycache__/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+*.h5
+src/lighthit_g4/_core*.so
+src/lighthit_g4/_core*.pyd
+wheelhouse/

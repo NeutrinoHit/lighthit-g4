@@ -1,0 +1,39 @@
+name: wheels
+
+# Builds the wheels (Geant4 linked in) and the source distribution and keeps
+# them as workflow artifacts.  Nothing is uploaded to PyPI from here.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  wheels:
+    name: wheel ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15-intel, macos-15]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
+        if: runner.os == 'macOS'
+        with:
+          path: ~/geant4
+          key: geant4-11.4.1-${{ matrix.os }}-${{ hashFiles('ci/build_geant4.sh') }}
+      - uses: pypa/cibuildwheel@v4.3.5
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: pipx run build --sdist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: dist/*.tar.gz

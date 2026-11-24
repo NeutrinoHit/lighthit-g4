@@ -1,0 +1,55 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.4"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "lighthit-g4"
+description = "Geant4 particle steps in water, written in the LightHit track format"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE", "LICENSES/*.txt"]
+authors = [{name = "Dmitry Naumov"}]
+keywords = ["Geant4", "neutrino telescope", "Cherenkov", "Baikal-GVD", "tau"]
+dependencies = ["numpy>=1.26", "h5py>=3.10"]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+pythia = ["pythia8mc>=8.318"]
+geant4_pybind = ["geant4_pybind>=0.1.3"]
+lighthit = ["lighthit>=0.3.0a9"]
+test = ["pytest>=8", "particle>=0.24"]
+
+[project.scripts]
+lighthit-g4 = "lighthit_g4.cli:main"
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build-dir = ".work/build/{wheel_tag}"
+cmake.build-type = "Release"
+wheel.py-api = "cp312"
+wheel.packages = ["src/lighthit_g4"]
+sdist.exclude = [".work", "benchmarks/*.h5"]
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "src/lighthit_g4/_version.py"
+
+[tool.cibuildwheel]
+build = "cp312-*"
+skip = "*-musllinux_* *-win*"
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+test-command = "python -c \"import lighthit_g4._core as c; print(c.geant4_version)\""
+
+[tool.cibuildwheel.linux]
+before-all = "bash ci/build_geant4.sh /opt/geant4"
+environment = { CMAKE_PREFIX_PATH = "/opt/geant4" }
+
+[tool.cibuildwheel.macos]
+before-all = "bash ci/build_geant4.sh $HOME/geant4"
+environment = { CMAKE_PREFIX_PATH = "$HOME/geant4", MACOSX_DEPLOYMENT_TARGET = "11.0" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
