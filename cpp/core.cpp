@@ -96,7 +96,7 @@ struct Shot {
 struct State {
   Settings settings;
   double threshold_e_MeV = 0;
-  Shot shot;
+  std::vector<Shot> shots;   // the primaries of the event, track IDs 1..N in this order
   std::vector<TrackRow> tracks;
   std::vector<ParticleRow> particles;
   long below_threshold = 0;
@@ -182,21 +182,23 @@ class Detector : public G4VUserDetectorConstruction {
 class Gun : public G4VUserPrimaryGeneratorAction {
  public:
   explicit Gun(State& state) : state_(state), gun_(1) {}
+  // one primary vertex per particle
   void GeneratePrimaries(G4Event* event) override
   {
-    const Shot& shot = state_.shot;
     const auto& c = state_.settings.center_m;
-    G4ParticleDefinition* definition = G4ParticleTable::GetParticleTable()->FindParticle(shot.pdgid);
-    const G4ThreeVector direction(shot.direction[0], shot.direction[1], shot.direction[2]);
-    gun_.SetParticleDefinition(definition);
-    gun_.SetParticleEnergy(shot.energy_GeV * GeV);
-    gun_.SetParticlePosition(G4ThreeVector((shot.position_m[0] - c[0]) * m,
-                                           (shot.position_m[1] - c[1]) * m,
-                                           (shot.position_m[2] - c[2]) * m));
-    gun_.SetParticleMomentumDirection(direction);
-    gun_.SetParticleTime(shot.time_ns * ns);
-    gun_.SetParticlePolarization(shot.polarization * direction);
-    gun_.GeneratePrimaryVertex(event);
+    for (const Shot& shot : state_.shots) {
+      G4ParticleDefinition* definition = G4ParticleTable::GetParticleTable()->FindParticle(shot.pdgid);
+      const G4ThreeVector direction(shot.direction[0], shot.direction[1], shot.direction[2]);
+      gun_.SetParticleDefinition(definition);
+      gun_.SetParticleEnergy(shot.energy_GeV * GeV);
+      gun_.SetParticlePosition(G4ThreeVector((shot.position_m[0] - c[0]) * m,
+                                             (shot.position_m[1] - c[1]) * m,
+                                             (shot.position_m[2] - c[2]) * m));
+      gun_.SetParticleMomentumDirection(direction);
+      gun_.SetParticleTime(shot.time_ns * ns);
+      gun_.SetParticlePolarization(shot.polarization * direction);
+      gun_.GeneratePrimaryVertex(event);
+    }
   }
 
  private:
@@ -341,11 +343,13 @@ class Engine {
     if (quiet_) G4UImanager::GetUIpointer()->SetCoutDestination(nullptr);
   }
 
-  nb::tuple run(const Shot& shot, long seed)
+  nb::tuple run(const std::vector<Shot>& shots, long seed)
   {
-    if (G4ParticleTable::GetParticleTable()->FindParticle(shot.pdgid) == nullptr)
-      throw std::invalid_argument("Geant4 does not know PDG " + std::to_string(shot.pdgid));
-    state_.shot = shot;
+    if (shots.empty()) throw std::invalid_argument("an event needs at least one primary");
+    for (const Shot& shot : shots)
+      if (G4ParticleTable::GetParticleTable()->FindParticle(shot.pdgid) == nullptr)
+        throw std::invalid_argument("Geant4 does not know PDG " + std::to_string(shot.pdgid));
+    state_.shots = shots;
     state_.reset();
     G4Random::setTheSeed(seed);
     const std::clock_t start = std::clock();
@@ -484,7 +488,7 @@ NB_MODULE(_core, module)
   nb::class_<Engine>(module, "Engine")
     .def(nb::init<const Settings&, nb::object, std::vector<int>>(), "settings"_a,
          "decayer"_a = nb::none(), "external_decays"_a = std::vector<int>())
-    .def("run", &Engine::run, "shot"_a, "seed"_a)
+    .def("run", &Engine::run, "shots"_a, "seed"_a)
     .def("energy_cuts_MeV", &Engine::energy_cuts_MeV)
     .def("particle_properties", &Engine::particle_properties, "pdgid"_a)
     .def("decayer_counts", &Engine::decayer_counts)

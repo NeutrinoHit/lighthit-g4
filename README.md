@@ -1,7 +1,8 @@
 # lighthit-g4
 
-A small Geant4 application driven from Python: one particle is shot into a
-cylinder of water, every charged step is recorded, and the event is written
+A small Geant4 application driven from Python: one particle, or the list of
+particles of an event, is shot into a cylinder of water, every charged step is
+recorded, and the event is written
 in the track format that [LightHit](https://github.com/NeutrinoHit/LightHit)
 reads. It is meant for tau-neutrino studies in Baikal-GVD without a full
 detector-simulation framework.
@@ -50,6 +51,35 @@ with Writer("tau.h5", sim) as out:
         out.write(sim.run(Primary(pdgid=15, energy_GeV=1000.0, polarization=-1.0)))
 ```
 
+An event may start from several primaries, for example the final state of a
+neutrino interaction from an event generator. Each one is its own vertex with
+its own start, time and polarization; Geant4 numbers them `uid = 1, 2, ...`
+in the order of the list:
+
+```python
+vertex = (0.0, 0.0, -100.0)
+event = sim.run([Primary(15, 800.0, vertex, (0, 0, 1), polarization=-1.0),
+                 Primary(211, 120.0, vertex, (0.1, 0, 1)),
+                 Primary(2212, 30.0, vertex, (-0.2, 0.1, 1))])
+event.primaries          # the list as given; event.daughters(1) are the tau products
+```
+
+From the command line the same list is a JSON file: either one event (a list
+of particles, simulated `-n` times) or a list of events (each a list of
+particles, simulated once):
+
+```bash
+lighthit-g4 --primaries event.json -n 10 --tau-decayer pythia -o nutau.h5
+```
+
+```json
+[{"pdgid": 15, "energy_GeV": 800, "position_m": [0, 0, -100], "direction": [0, 0, 1], "polarization": -1},
+ {"pdgid": 211, "energy_GeV": 120, "position_m": [0, 0, -100], "direction": [0.1, 0, 1]}]
+```
+
+The fields are those of `Primary`; `pdgid` and `energy_GeV` (kinetic) are
+required, the rest default to the origin, +z, time 0 and no polarization.
+
 Read back with `read_event(path, n)`, or give the file to LightHit:
 `lighthit.sources.G4Shower.from_hdf5(path, n)`.
 
@@ -59,7 +89,8 @@ range cut (default 0.5 mm), Cherenkov index for the kill rule (default 1.35),
 `--secondaries none` (only the primary is tracked; its secondaries are
 listed), `--keep-below-threshold`, `--tau-decayer geant4|pythia`,
 `--polarization` (helicity of the primary, used by external decays),
-`--backend core|geant4_pybind`.
+`--backend core|geant4_pybind`, `--primaries FILE` (instead of `--pdg` and
+`--energy-GeV`).
 
 ## File layout
 
@@ -76,7 +107,8 @@ its true path length. At-rest steps (zero length) are not written.
 
 `event_<n>/particles` — every new track: `uid, parent_uid, pdgid, mass_GeV,
 creator, x_m, y_m, z_m, t_ns, dx, dy, dz, e_kin_GeV, tracked`. Neutrinos are
-listed but not tracked. Attributes of `event_<n>`: primary, seed, CPU time,
+listed but not tracked. Attributes of `event_<n>`: `primaries` (JSON list,
+`uid = 1, 2, ...` in this order; files of 0.1.0a1 have one `primary`), seed, CPU time,
 `info` (number of electrons and gammas killed at birth below the light
 threshold, which are not listed).
 

@@ -7,7 +7,8 @@ thresholds and production cuts.  For every event ``n``:
   (``TRACK_DTYPE``), one contiguous block per ``uid``;
 * ``event_<n>/particles``: every new track with parent, creator process,
   start, direction, kinetic energy and whether it was tracked;
-* attributes of ``event_<n>``: primary, seed, CPU time.
+* attributes of ``event_<n>``: ``primaries`` (JSON list, ``uid = 1, 2, ...``
+  in this order), seed, CPU time.  Files of 0.1.0a1 have one ``primary``.
 """
 import json
 from pathlib import Path
@@ -16,6 +17,12 @@ import h5py
 import numpy as np
 
 from .simulation import Event, Primary
+
+
+def primary_json(primary):
+    return {"pdgid": int(primary.pdgid), "energy_GeV": float(primary.energy_GeV),
+            "position_m": list(primary.position_m), "direction": list(primary.direction),
+            "time_ns": float(primary.time_ns), "polarization": float(primary.polarization)}
 
 __all__ = ["Writer", "read_event", "read_header", "event_count"]
 
@@ -35,11 +42,7 @@ class Writer:
         group = self.file.create_group(f"event_{self.count}")
         group.create_dataset("tracks", data=event.tracks)
         group.create_dataset("particles", data=event.particles)
-        primary = event.primary
-        group.attrs["primary"] = json.dumps({
-            "pdgid": int(primary.pdgid), "energy_GeV": float(primary.energy_GeV),
-            "position_m": list(primary.position_m), "direction": list(primary.direction),
-            "time_ns": float(primary.time_ns), "polarization": float(primary.polarization)})
+        group.attrs["primaries"] = json.dumps([primary_json(p) for p in event.primaries])
         group.attrs["seed"] = int(event.seed)
         group.attrs["cpu_s"] = float(event.cpu_s)
         group.attrs["info"] = json.dumps(event.info)
@@ -70,7 +73,10 @@ def event_count(path):
 def read_event(path, event=0):
     with h5py.File(path, "r") as f:
         group = f[f"event_{int(event)}"]
-        primary = json.loads(group.attrs["primary"])
-        return Event(int(event), Primary(**primary), int(group.attrs["seed"]),
+        if "primaries" in group.attrs:
+            primaries = tuple(Primary(**p) for p in json.loads(group.attrs["primaries"]))
+        else:                                    # files of 0.1.0a1
+            primaries = (Primary(**json.loads(group.attrs["primary"])),)
+        return Event(int(event), primaries, int(group.attrs["seed"]),
                      np.asarray(group["tracks"][()]), np.asarray(group["particles"][()]),
                      float(group.attrs["cpu_s"]), json.loads(group.attrs.get("info", "{}")))

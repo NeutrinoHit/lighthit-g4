@@ -1,5 +1,10 @@
 """One Geant4 application: a water cylinder, a particle gun, recorded steps.
 
+An event starts from one primary or from a list of primaries (for example the
+final state of a neutrino interaction from an event generator): each primary
+is its own vertex with its own start, time and polarization, and Geant4
+numbers them ``uid = 1, 2, ...`` in the order of the list (``parent_uid = 0``).
+
 Two backends run the same application with the same rules: the C++ core
 (``backend="core"``, Geant4 linked into ``lighthit_g4._core``) and the
 geant4_pybind version with the user actions in Python
@@ -40,7 +45,7 @@ phase index used downstream; the default equals the LightHit default
 Tau decays.  ``tau_decayer="geant4"`` uses the Geant4 decay table (phase
 space for the hadronic channels, no polarization); ``tau_decayer="pythia"``
 hands tau decays to Pythia 8 (``lighthit_g4.pythia``) with the longitudinal
-polarization ``Primary.polarization`` of the primary tau.
+polarization of the tau (``Primary.polarization`` for a primary tau).
 """
 from dataclasses import asdict, dataclass, field
 import math
@@ -135,15 +140,36 @@ class Primary:
             raise ValueError("polarization must lie in [-1, 1]")
 
 
+def as_primaries(primaries):
+    """A :class:`Primary` or an iterable of them, as a non-empty tuple."""
+    if isinstance(primaries, Primary):
+        return (primaries,)
+    out = tuple(primaries)
+    if not out:
+        raise ValueError("an event needs at least one primary")
+    for primary in out:
+        if not isinstance(primary, Primary):
+            raise TypeError(f"expected Primary, got {type(primary).__name__}")
+    return out
+
+
 @dataclass
 class Event:
+    """One event: ``primaries[k]`` has ``uid = k + 1``."""
     index: int
-    primary: Primary
+    primaries: tuple
     seed: int
     tracks: np.ndarray
     particles: np.ndarray
     cpu_s: float = 0.0
     info: dict = field(default_factory=dict)
+
+    @property
+    def primary(self):
+        """The primary of a one-particle event."""
+        if len(self.primaries) != 1:
+            raise ValueError(f"the event has {len(self.primaries)} primaries; use Event.primaries")
+        return self.primaries[0]
 
     def particle(self, uid):
         row = self.particles[self.particles["uid"] == uid]
@@ -186,15 +212,18 @@ class _CoreEngine:
         self.threshold_e_MeV = self.engine.threshold_e_MeV
         self._core = _core
 
-    def run(self, primary, seed):
-        shot = self._core.Shot()
-        shot.pdgid = int(primary.pdgid)
-        shot.energy_GeV = float(primary.energy_GeV)
-        shot.position_m = primary.position_m
-        shot.direction = primary.direction
-        shot.time_ns = float(primary.time_ns)
-        shot.polarization = float(primary.polarization)
-        tracks, particles, below, cpu = self.engine.run(shot, int(seed))
+    def run(self, primaries, seed):
+        shots = []
+        for primary in primaries:
+            shot = self._core.Shot()
+            shot.pdgid = int(primary.pdgid)
+            shot.energy_GeV = float(primary.energy_GeV)
+            shot.position_m = primary.position_m
+            shot.direction = primary.direction
+            shot.time_ns = float(primary.time_ns)
+            shot.polarization = float(primary.polarization)
+            shots.append(shot)
+        tracks, particles, below, cpu = self.engine.run(shots, int(seed))
         return (np.frombuffer(tracks, TRACK_DTYPE).copy(),
                 np.frombuffer(particles, PARTICLE_DTYPE).copy(), below, cpu)
 
@@ -212,7 +241,7 @@ class _CoreEngine:
 
 
 class Simulation:
-    """Geant4 set up once; :meth:`run` shoots one primary per event."""
+    """Geant4 set up once; :meth:`run` simulates one event from one or more primaries."""
     _instance = None
 
     def __init__(self, config=Config(), *, verbose=0):
@@ -253,14 +282,17 @@ class Simulation:
             "units": "m, ns, GeV; positions in the user frame (center_m is the water centre)",
         }
 
-    def run(self, primary, *, seed=None):
-        """Simulate one event; the seed defaults to ``config.seed + event index``."""
+    def run(self, primaries, *, seed=None):
+        """Simulate one event from a :class:`Primary` or a list of them (all
+        shot into the same event, ``uid`` 1, 2, ... in list order); the seed
+        defaults to ``config.seed + event index``."""
+        primaries = as_primaries(primaries)
         index = self.events_done
         seed = self.config.seed + index if seed is None else int(seed)
-        tracks, particles, below, cpu = self.engine.run(primary, seed)
+        tracks, particles, below, cpu = self.engine.run(primaries, seed)
         if self.energy_cuts_MeV is None:
             self.energy_cuts_MeV = self.engine.energy_cuts_MeV()
         self.events_done += 1
-        self.primary_species.add(int(primary.pdgid))
+        self.primary_species.update(int(p.pdgid) for p in primaries)
         info = {"killed_below_threshold_at_birth": int(below)}
-        return Event(index, primary, seed, tracks, particles, cpu, info)
+        return Event(index, primaries, seed, tracks, particles, cpu, info)

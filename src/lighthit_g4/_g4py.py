@@ -84,17 +84,18 @@ class _Gun(g4.G4VUserPrimaryGeneratorAction):
         self.gun = g4.G4ParticleGun(1)
 
     def GeneratePrimaries(self, event):
-        primary = self.sim.current
-        definition = g4.G4ParticleTable.GetParticleTable().FindParticle(int(primary.pdgid))
-        if definition is None:
-            raise ValueError(f"Geant4 does not know PDG {primary.pdgid}")
-        position = np.asarray(primary.position_m, float) - self.sim.recorder.offset
-        self.gun.SetParticleDefinition(definition)
-        self.gun.SetParticleEnergy(primary.energy_GeV * g4.GeV)
-        self.gun.SetParticlePosition(g4.G4ThreeVector(*(position * g4.m)))
-        self.gun.SetParticleMomentumDirection(g4.G4ThreeVector(*primary.direction))
-        self.gun.SetParticleTime(primary.time_ns * g4.ns)
-        self.gun.GeneratePrimaryVertex(event)
+        # one primary vertex per particle; Geant4 numbers them 1..N in this order
+        for primary in self.sim.current:
+            definition = g4.G4ParticleTable.GetParticleTable().FindParticle(int(primary.pdgid))
+            position = np.asarray(primary.position_m, float) - self.sim.recorder.offset
+            polarization = primary.polarization * np.asarray(primary.direction, float)
+            self.gun.SetParticleDefinition(definition)
+            self.gun.SetParticleEnergy(primary.energy_GeV * g4.GeV)
+            self.gun.SetParticlePosition(g4.G4ThreeVector(*(position * g4.m)))
+            self.gun.SetParticleMomentumDirection(g4.G4ThreeVector(*primary.direction))
+            self.gun.SetParticleTime(primary.time_ns * g4.ns)
+            self.gun.SetParticlePolarization(g4.G4ThreeVector(*polarization))
+            self.gun.GeneratePrimaryVertex(event)
 
 
 class _Stacking(g4.G4UserStackingAction):
@@ -221,9 +222,12 @@ class PybindEngine:
             return "below"
         return True
 
-    def run(self, primary, seed):
+    def run(self, primaries, seed):
+        for primary in primaries:
+            if g4.G4ParticleTable.GetParticleTable().FindParticle(int(primary.pdgid)) is None:
+                raise ValueError(f"Geant4 does not know PDG {primary.pdgid}")
         g4.G4Random.setTheSeed(int(seed))
-        self.current = primary
+        self.current = tuple(primaries)
         self.recorder.reset()
         start = time.process_time()
         self.run_manager.BeamOn(1)
