@@ -182,6 +182,43 @@ polarization `TauDecays:tauPolarization`:
 left-handed (h → −1); its polarization should come from the neutrino event
 generator together with the tau.
 
+## Light without the steps
+
+For LightHit's shower route a run can keep only the light of its steps: a
+`LightSink` receives every charged step and keeps, per light component and
+per OM, the direct light (order 0), the earliest arrival and the sums of the
+finest emission cells; the steps themselves are not stored. The plan (OM
+tables, clock, cell frame) comes from LightHit:
+
+```python
+from lighthit.event import EventTransport, SourceComponent
+from lighthit.streamed import StreamPlan, streamed_showers
+from lighthit_g4 import LightSink
+
+transport = EventTransport(kernel)                  # LightHit kernel of the detector
+plan = StreamPlan.of(transport.shower_route().kernel, vertex, axis=direction, components=3)
+sink = LightSink(plan)                              # worker threads: all cores
+event = sim.run(primaries, light=sink,
+                components=[0, 0, 0, 0, 0, 1],      # light component of each primary
+                decay_components=[None] * 5 + [2],  # and of its decay products
+                tracks=False, particles="primaries")
+response = transport([SourceComponent("shower", s) for s in streamed_showers(plan, event.light)])
+```
+
+Every other particle belongs to its parent's component. `tracks=False` stores
+no steps; `particles="primaries"` keeps only the primaries and their daughters
+(`decay_vertex` works), `"none"` nothing. Steps are processed in blocks by
+worker threads while Geant4 runs; the result does not depend on the number of
+threads. The sink computes what `lighthit.streamed.stream_elements` computes
+from the stored steps (tested on the same Geant4 event).
+
+A pseudo ν_τ CC event of 200 TeV (95 million charged steps, three light
+components, 64-core Linux machine): 387 s with the sink and a peak of 17 GB
+(43 million finest cells), against 509 s and a 17.8 GB file with the steps;
+both runs give the same light bit for bit. LightHit then needs 724 s for the
+event instead of 81 s reading and 1130 s from the stored steps, with the same
+active OMs and order 0 (details in LightHit's `docs/streamed-showers.md`).
+
 ## Tests
 
 ```bash
@@ -194,7 +231,11 @@ of the decay products. Tau (Pythia, 5000 decays per helicity): pion spectrum
 against the helicity, energy of the products, products left to Geant4.
 Format: row blocks, frame, cuts, kill rule, that LightHit reads the file and
 finds the shower axis along the primary direction, and that the C++ core and
-the geant4_pybind version give identical events.
+the geant4_pybind version give identical events. Light sink (needs LightHit):
+against `lighthit.streamed.stream_elements` on the same steps, stored and from
+a Geant4 run with three light components (step, pair and cell counts equal,
+charges and bins within 1e-10), independent of threads and block size, and
+the same light without steps and particle table.
 
 ## Speed
 

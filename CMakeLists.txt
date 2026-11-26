@@ -27,7 +27,7 @@ if(NOT Geant4_FOUND)
     "(ci/build_geant4.sh is in the source distribution and in the repository.)")
 endif()
 
-nanobind_add_module(_core STABLE_ABI NB_STATIC cpp/core.cpp cpp/external_decayer.cpp)
+nanobind_add_module(_core STABLE_ABI NB_STATIC cpp/core.cpp cpp/external_decayer.cpp cpp/light_sink.cpp)
 target_include_directories(_core PRIVATE cpp)
 target_link_libraries(_core PRIVATE ${Geant4_LIBRARIES})
 

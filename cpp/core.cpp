@@ -19,6 +19,7 @@
 #include <vector>
 
 #include <nanobind/nanobind.h>
+#include <nanobind/ndarray.h>
 #include <nanobind/stl/array.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
@@ -55,6 +56,7 @@
 #include "Randomize.hh"
 
 #include "external_decayer.hh"
+#include "light_sink.hh"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -100,8 +102,18 @@ struct State {
   std::vector<TrackRow> tracks;
   std::vector<ParticleRow> particles;
   long below_threshold = 0;
+  // what is kept: the steps (tracks), the particles (0 all, 1 the primaries and
+  // their daughters, 2 none) and the light of the steps (sink, may be null)
+  bool record_tracks = true;
+  int record_particles = 0;
+  LightSink* sink = nullptr;
+  // light components: of each primary, of the decay products of each primary
+  // (-1: as the primary); every other particle has its parent's
+  std::vector<int> primary_component, decay_component;
+  std::vector<std::int8_t> component_of;   // by uid
   // current track
   std::int64_t uid = 0, parent = 0, pdg = 0;
+  int component = 0;
   bool charged = false;
   double electron_cut = -1;   // internal energy units; < 0 means no in-flight kill
 
@@ -109,8 +121,10 @@ struct State {
   {
     tracks.clear();
     particles.clear();
+    component_of.assign(shots.size() + 1, 0);
     below_threshold = 0;
     uid = parent = pdg = 0;
+    component = 0;
     charged = false;
     electron_cut = -1;
   }
@@ -122,6 +136,18 @@ struct State {
     const G4ThreeVector direction = track->GetMomentumDirection();
     const G4VProcess* process = track->GetCreatorProcess();
     const G4ParticleDefinition* definition = track->GetDefinition();
+    const std::int64_t id = track->GetTrackID(), mother = track->GetParentID();
+    const std::int64_t primaries = std::int64_t(shots.size());
+    if (sink != nullptr) {
+      int k = 0;
+      if (mother == 0) k = id <= primaries ? primary_component[id - 1] : 0;
+      else if (mother <= primaries && process != nullptr && process->GetProcessName() == "Decay"
+               && decay_component[mother - 1] >= 0) k = decay_component[mother - 1];
+      else k = mother < std::int64_t(component_of.size()) ? component_of[mother] : 0;
+      if (id >= std::int64_t(component_of.size())) component_of.resize(std::size_t(id) * 3 / 2 + 16, 0);
+      component_of[id] = std::int8_t(k);
+    }
+    if (record_particles == 2 || (record_particles == 1 && mother > primaries)) return;
     ParticleRow row{};
     row.uid = track->GetTrackID();
     row.parent_uid = track->GetParentID();
@@ -145,10 +171,12 @@ struct State {
   {
     const auto& c = settings.center_m;
     const G4ThreeVector position = point->GetPosition();
-    tracks.push_back(TrackRow{uid, parent, pdg, position.x() / m + c[0], position.y() / m + c[1],
-                              position.z() / m + c[2], point->GetGlobalTime() / ns,
-                              point->GetBeta(), step_length / m,
-                              point->GetKineticEnergy() / GeV});
+    const double x = position.x() / m + c[0], y = position.y() / m + c[1], z = position.z() / m + c[2];
+    const double t = point->GetGlobalTime() / ns, beta = point->GetBeta(), length = step_length / m;
+    if (record_tracks)
+      tracks.push_back(TrackRow{uid, parent, pdg, x, y, z, t, beta, length,
+                                point->GetKineticEnergy() / GeV});
+    if (sink != nullptr) sink->point(uid, component, x, y, z, t, beta, length);
   }
 
   // stacking rule for a secondary: 1 track, 0 list only, -1 kill below threshold
@@ -237,6 +265,8 @@ class Tracking : public G4UserTrackingAction {
     state_.uid = track->GetTrackID();
     state_.parent = track->GetParentID();
     state_.pdg = definition->GetPDGEncoding();
+    state_.component = state_.uid < std::int64_t(state_.component_of.size())
+                         ? state_.component_of[state_.uid] : 0;
     state_.charged = definition->GetPDGCharge() != 0;
     state_.electron_cut = (state_.pdg == 11 && state_.settings.kill_below_threshold)
                             ? state_.threshold_e_MeV * MeV : -1.0;
@@ -343,20 +373,43 @@ class Engine {
     if (quiet_) G4UImanager::GetUIpointer()->SetCoutDestination(nullptr);
   }
 
-  nb::tuple run(const std::vector<Shot>& shots, long seed)
+  nb::tuple run(const std::vector<Shot>& shots, long seed, LightSink* sink,
+                std::vector<int> components, std::vector<int> decay_components,
+                bool record_tracks, int record_particles)
   {
     if (shots.empty()) throw std::invalid_argument("an event needs at least one primary");
     for (const Shot& shot : shots)
       if (G4ParticleTable::GetParticleTable()->FindParticle(shot.pdgid) == nullptr)
         throw std::invalid_argument("Geant4 does not know PDG " + std::to_string(shot.pdgid));
+    if (record_particles < 0 || record_particles > 2)
+      throw std::invalid_argument("record_particles is 0 (all), 1 (primaries and daughters) or 2 (none)");
+    if (components.empty()) components.assign(shots.size(), 0);
+    if (decay_components.empty()) decay_components.assign(shots.size(), -1);
+    if (components.size() != shots.size() || decay_components.size() != shots.size())
+      throw std::invalid_argument("one light component and one decay component per primary");
+    if (sink != nullptr) {
+      const int count = sink->plan().components;
+      for (std::size_t i = 0; i < shots.size(); ++i)
+        if (components[i] < 0 || components[i] >= count || decay_components[i] >= count
+            || count > 127)
+          throw std::invalid_argument("light components outside the sink plan");
+    }
     state_.shots = shots;
+    state_.sink = sink;
+    state_.record_tracks = record_tracks;
+    state_.record_particles = record_particles;
+    state_.primary_component = components;
+    state_.decay_component = decay_components;
     state_.reset();
     G4Random::setTheSeed(seed);
     const std::clock_t start = std::clock();
     {
       nb::gil_scoped_release release;
+      if (sink != nullptr) sink->reset();
       run_manager_->BeamOn(1);
+      if (sink != nullptr) sink->finish();
     }
+    state_.sink = nullptr;
     const double cpu = double(std::clock() - start) / CLOCKS_PER_SEC;
     if (external_ != nullptr && external_->decayer != nullptr && !external_->decayer->error.empty()) {
       const std::string error = external_->decayer->error;
@@ -456,6 +509,165 @@ class Engine {
   std::vector<int> external_pdgids_;
 };
 
+// ---- light sink: plan from the dictionary of lighthit.streamed.StreamPlan, results as arrays
+
+using DoubleArray = nb::ndarray<const double, nb::c_contig, nb::device::cpu>;
+using IntArray = nb::ndarray<const std::int64_t, nb::c_contig, nb::device::cpu>;
+
+std::vector<double> doubles(const nb::dict& d, const char* name)
+{
+  const DoubleArray a = nb::cast<DoubleArray>(d[name]);
+  return std::vector<double>(a.data(), a.data() + a.size());
+}
+
+std::vector<std::int64_t> integers(const nb::dict& d, const char* name)
+{
+  const IntArray a = nb::cast<IntArray>(d[name]);
+  return std::vector<std::int64_t>(a.data(), a.data() + a.size());
+}
+
+template <std::size_t N>
+std::array<double, N> fixed(const nb::dict& d, const char* name)
+{
+  const std::vector<double> v = doubles(d, name);
+  if (v.size() != N) throw std::invalid_argument(std::string("light sink plan: ") + name);
+  std::array<double, N> out{};
+  std::copy(v.begin(), v.end(), out.begin());
+  return out;
+}
+
+SinkPlan sink_plan(const nb::dict& d)
+{
+  SinkPlan p;
+  auto number = [&](const char* name) { return nb::cast<double>(d[name]); };
+  auto count = [&](const char* name) { return nb::cast<int>(d[name]); };
+  p.components = count("components");
+  p.reference_phase_index = number("reference_phase_index");
+  p.max_phase = number("max_phase");
+  p.light_per_m = number("light_per_m");
+  p.flight_ns_per_m = number("flight_ns_per_m");
+  p.pos = doubles(d, "pos");
+  p.ori = doubles(d, "ori");
+  p.area = doubles(d, "area");
+  p.R = number("R");
+  p.n = doubles(d, "n");
+  p.ng = doubles(d, "ng");
+  p.mu = doubles(d, "mu");
+  p.eg = doubles(d, "eg");
+  p.lam0 = number("lam0");
+  p.dlam = number("dlam");
+  p.knots = doubles(d, "knots");
+  p.acc = doubles(d, "acc");
+  p.n_max = number("n_max");
+  p.n_min = number("n_min");
+  p.spec_max = number("spec_max");
+  p.mu_min = number("mu_min");
+  p.origins = doubles(d, "origins");
+  p.edge0 = number("edge0");
+  p.bin_w = number("bin_w");
+  p.n_bins = count("n_bins");
+  p.end_x = doubles(d, "end_x");
+  p.end_w = doubles(d, "end_w");
+  p.inner_x = doubles(d, "inner_x");
+  p.inner_w = doubles(d, "inner_w");
+  p.piece_m = number("piece_m");
+  p.pair_tol = number("pair_tol");
+  p.chunks = count("chunks");
+  p.s_cx = doubles(d, "s_cx");
+  p.s_cy = doubles(d, "s_cy");
+  p.s_dev = doubles(d, "s_dev");
+  p.s_start = integers(d, "s_start");
+  p.s_count = integers(d, "s_count");
+  p.om_order = integers(d, "om_order");
+  p.om_z = doubles(d, "om_z");
+  p.centre = fixed<3>(d, "frame_centre");
+  p.axis = fixed<3>(d, "frame_axis");
+  p.u = fixed<3>(d, "frame_u");
+  p.v = fixed<3>(d, "frame_v");
+  p.delay_origin = number("delay_origin");
+  p.cell_size = fixed<5>(d, "cell_size");
+  return p;
+}
+
+template <typename T>
+nb::ndarray<nb::numpy, T> numpy_copy(const T* data, std::vector<std::size_t> shape)
+{
+  std::size_t size = 1;
+  for (std::size_t n : shape) size *= n;
+  T* copy = new T[size > 0 ? size : 1];
+  std::copy(data, data + size, copy);
+  nb::capsule owner(copy, [](void* p) noexcept { delete[] static_cast<T*>(p); });
+  return nb::ndarray<nb::numpy, T>(copy, shape.size(), shape.data(), owner);
+}
+
+nb::dict sink_result(const LightSink& sink)
+{
+  const SinkPlan& p = sink.plan();
+  const std::size_t K = p.components, n = p.n_om(), bins = p.n_bins;
+  std::vector<double> charge, binned, skipped, earliest, light, ring_light;
+  std::vector<std::int64_t> pairs, tested, steps, ring_steps;
+  nb::list keys, sums;
+  for (const ComponentResult& r : sink.results()) {
+    charge.insert(charge.end(), r.charge.begin(), r.charge.end());
+    binned.insert(binned.end(), r.bins.begin(), r.bins.end());
+    skipped.insert(skipped.end(), r.skipped.begin(), r.skipped.end());
+    earliest.insert(earliest.end(), r.earliest.begin(), r.earliest.end());
+    light.push_back(r.light);
+    ring_light.push_back(r.ring_light);
+    pairs.push_back(r.pairs);
+    tested.push_back(r.tested);
+    steps.push_back(r.steps);
+    ring_steps.push_back(r.ring_steps);
+    const std::size_t cells = r.cells.size();
+    keys.append(numpy_copy(r.cells.keys().data(), {cells, std::size_t(CELL_KEYS)}));
+    sums.append(numpy_copy(r.cells.sums().data(), {cells, std::size_t(CELL_SUMS)}));
+  }
+  nb::dict out;
+  out["charge"] = numpy_copy(charge.data(), {K, n});
+  out["bins"] = numpy_copy(binned.data(), {K, n, bins});
+  out["skipped"] = numpy_copy(skipped.data(), {K, n});
+  out["earliest_ns"] = numpy_copy(earliest.data(), {K, n});
+  out["pairs"] = numpy_copy(pairs.data(), {K});
+  out["tested"] = numpy_copy(tested.data(), {K});
+  out["steps"] = numpy_copy(steps.data(), {K});
+  out["ring_steps"] = numpy_copy(ring_steps.data(), {K});
+  out["light"] = numpy_copy(light.data(), {K});
+  out["ring_light"] = numpy_copy(ring_light.data(), {K});
+  out["cell_key"] = keys;
+  out["cell_sums"] = sums;
+  return out;
+}
+
+// stored steps or stored vertices into a sink (tests, files written earlier)
+void sink_steps(LightSink& sink, DoubleArray start, DoubleArray direction, DoubleArray length,
+                DoubleArray c0, DoubleArray c2, DoubleArray beta, DoubleArray t0, DoubleArray t1,
+                IntArray component)
+{
+  const std::size_t n = length.size();
+  if (start.size() != 3 * n || direction.size() != 3 * n || c0.size() != n || c2.size() != n
+      || beta.size() != n || t0.size() != n || t1.size() != n || component.size() != n)
+    throw std::invalid_argument("one row of every column per step");
+  nb::gil_scoped_release release;
+  for (std::size_t i = 0; i < n; ++i)
+    sink.add(SinkStep{start.data()[3 * i], start.data()[3 * i + 1], start.data()[3 * i + 2],
+                      direction.data()[3 * i], direction.data()[3 * i + 1], direction.data()[3 * i + 2],
+                      length.data()[i], c0.data()[i], c2.data()[i], beta.data()[i], t0.data()[i],
+                      t1.data()[i], int(component.data()[i])});
+}
+
+void sink_points(LightSink& sink, IntArray uid, IntArray component, DoubleArray x, DoubleArray y,
+                 DoubleArray z, DoubleArray t, DoubleArray beta, DoubleArray step_length)
+{
+  const std::size_t n = uid.size();
+  if (component.size() != n || x.size() != n || y.size() != n || z.size() != n || t.size() != n
+      || beta.size() != n || step_length.size() != n)
+    throw std::invalid_argument("one row of every column per vertex");
+  nb::gil_scoped_release release;
+  for (std::size_t i = 0; i < n; ++i)
+    sink.point(uid.data()[i], int(component.data()[i]), x.data()[i], y.data()[i], z.data()[i],
+               t.data()[i], beta.data()[i], step_length.data()[i]);
+}
+
 }  // namespace lhg4
 
 NB_MODULE(_core, module)
@@ -485,10 +697,27 @@ NB_MODULE(_core, module)
     .def_rw("time_ns", &Shot::time_ns)
     .def_rw("polarization", &Shot::polarization);
 
+  nb::class_<LightSink>(module, "LightSink")
+    .def("__init__", [](LightSink* self, nb::dict plan, int threads, std::size_t block) {
+           new (self) LightSink(sink_plan(plan), threads);
+           if (block > 0) self->block_size = block;
+         }, "plan"_a, "threads"_a = 0, "block"_a = 0)
+    .def("reset", [](LightSink& s) { nb::gil_scoped_release r; s.reset(); })
+    .def("finish", [](LightSink& s) { nb::gil_scoped_release r; s.finish(); })
+    .def("add_steps", &sink_steps, "start"_a, "direction"_a, "length"_a, "c0"_a, "c2"_a,
+         "beta"_a, "t0"_a, "t1"_a, "component"_a)
+    .def("add_points", &sink_points, "uid"_a, "component"_a, "x"_a, "y"_a, "z"_a, "t"_a,
+         "beta"_a, "step_length"_a)
+    .def("result", &sink_result)
+    .def_prop_ro("threads", &LightSink::threads)
+    .def_prop_ro("components", [](const LightSink& s) { return s.plan().components; });
+
   nb::class_<Engine>(module, "Engine")
     .def(nb::init<const Settings&, nb::object, std::vector<int>>(), "settings"_a,
          "decayer"_a = nb::none(), "external_decays"_a = std::vector<int>())
-    .def("run", &Engine::run, "shots"_a, "seed"_a)
+    .def("run", &Engine::run, "shots"_a, "seed"_a, "sink"_a.none() = nb::none(),
+         "components"_a = std::vector<int>(), "decay_components"_a = std::vector<int>(),
+         "record_tracks"_a = true, "record_particles"_a = 0)
     .def("energy_cuts_MeV", &Engine::energy_cuts_MeV)
     .def("particle_properties", &Engine::particle_properties, "pdgid"_a)
     .def("decayer_counts", &Engine::decayer_counts)

@@ -163,6 +163,7 @@ class Event:
     particles: np.ndarray
     cpu_s: float = 0.0
     info: dict = field(default_factory=dict)
+    light: dict | None = None     # the light sink's result (``Simulation.run(light=...)``)
 
     @property
     def primary(self):
@@ -212,7 +213,8 @@ class _CoreEngine:
         self.threshold_e_MeV = self.engine.threshold_e_MeV
         self._core = _core
 
-    def run(self, primaries, seed):
+    def run(self, primaries, seed, light=None, components=None, decay_components=None,
+            tracks=True, particles=0):
         shots = []
         for primary in primaries:
             shot = self._core.Shot()
@@ -223,9 +225,11 @@ class _CoreEngine:
             shot.time_ns = float(primary.time_ns)
             shot.polarization = float(primary.polarization)
             shots.append(shot)
-        tracks, particles, below, cpu = self.engine.run(shots, int(seed))
-        return (np.frombuffer(tracks, TRACK_DTYPE).copy(),
-                np.frombuffer(particles, PARTICLE_DTYPE).copy(), below, cpu)
+        rows, listed, below, cpu = self.engine.run(
+            shots, int(seed), None if light is None else light._sink,
+            list(components or []), list(decay_components or []), bool(tracks), int(particles))
+        return (np.frombuffer(rows, TRACK_DTYPE).copy(),
+                np.frombuffer(listed, PARTICLE_DTYPE).copy(), below, cpu)
 
     def energy_cuts_MeV(self):
         return self.engine.energy_cuts_MeV()
@@ -282,17 +286,39 @@ class Simulation:
             "units": "m, ns, GeV; positions in the user frame (center_m is the water centre)",
         }
 
-    def run(self, primaries, *, seed=None):
+    def run(self, primaries, *, seed=None, light=None, components=None, decay_components=None,
+            tracks=True, particles="all"):
         """Simulate one event from a :class:`Primary` or a list of them (all
         shot into the same event, ``uid`` 1, 2, ... in list order); the seed
-        defaults to ``config.seed + event index``."""
+        defaults to ``config.seed + event index``.
+
+        ``light`` (a :class:`lighthit_g4.LightSink`, C++ backend only) receives
+        every charged step; ``Event.light`` is then its result. Light
+        components: ``components[k]`` of primary ``k`` (default 0),
+        ``decay_components[k]`` of its decay products (None: as the primary);
+        every other particle has its parent's. ``tracks=False`` keeps no
+        steps, ``particles`` keeps ``"all"`` particles, the ``"primaries"`` and
+        their daughters, or ``"none"``.
+        """
+        from .light import PARTICLES
         primaries = as_primaries(primaries)
+        if particles not in PARTICLES:
+            raise ValueError(f"particles must be one of {sorted(PARTICLES)}")
+        options = {}
+        if light is not None or not tracks or particles != "all" or components or decay_components:
+            if self.config.backend != "core":
+                raise ValueError("light sinks and reduced records need backend='core'")
+            options = dict(light=light, components=components,
+                           decay_components=[-1 if c is None else int(c)
+                                             for c in (decay_components or [])],
+                           tracks=tracks, particles=PARTICLES[particles])
         index = self.events_done
         seed = self.config.seed + index if seed is None else int(seed)
-        tracks, particles, below, cpu = self.engine.run(primaries, seed)
+        tracks, particles, below, cpu = self.engine.run(primaries, seed, **options)
         if self.energy_cuts_MeV is None:
             self.energy_cuts_MeV = self.engine.energy_cuts_MeV()
         self.events_done += 1
         self.primary_species.update(int(p.pdgid) for p in primaries)
         info = {"killed_below_threshold_at_birth": int(below)}
-        return Event(index, primaries, seed, tracks, particles, cpu, info)
+        return Event(index, primaries, seed, tracks, particles, cpu, info,
+                     None if light is None else light.result())
